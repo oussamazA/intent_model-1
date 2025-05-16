@@ -26,21 +26,31 @@ def load_model_and_metadata():
     global model, words, classes, intents, preprocessor
     
     try:
-        model = tf.keras.models.load_model('model/chatbot_model')
+        # Try loading Keras v3 format first
+        keras_v3_path = os.path.join('model', 'chatbot_model.keras')
+        if os.path.exists(keras_v3_path):
+            model = tf.keras.models.load_model(keras_v3_path)
+        else:
+            # Fallback to SavedModel format
+            model = tf.keras.models.load_model(os.path.join('model', 'chatbot_model'))
         
-        with open('model/metadata.pkl', 'rb') as f:
+        # Load metadata
+        metadata_path = os.path.join('model', 'metadata.pkl')
+        with open(metadata_path, 'rb') as f:
             metadata = pickle.load(f)
         
         words = metadata['words']
         classes = metadata['classes']
         intents = metadata['intents']
         
-        with open('model/preprocessor.pkl', 'rb') as f:
+        # Load preprocessor
+        preprocessor_path = os.path.join('model', 'preprocessor.pkl')
+        with open(preprocessor_path, 'rb') as f:
             preprocessor = pickle.load(f)
             
         return True
     except Exception as e:
-        print(f"Error loading model and metadata: {e}")
+        print(f"Error loading model: {str(e)}")
         return False
 
 # User sessions to store context
