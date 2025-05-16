@@ -26,7 +26,7 @@ def load_model_and_metadata():
     global model, words, classes, intents, preprocessor
     
     try:
-        model = tf.keras.models.load_model('model/chatbot_model.keras')
+        model = tf.keras.models.load_model('model/chatbot_model')
         
         with open('model/metadata.pkl', 'rb') as f:
             metadata = pickle.load(f)
