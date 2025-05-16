@@ -8,92 +8,63 @@ from flask_cors import CORS
 import tensorflow as tf
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
-# Check if model directory exists
-if not os.path.exists('model'):
-    os.makedirs('model', exist_ok=True)
-
-# Global variables to store model and metadata
+# Global holders
 model = None
 words = None
 classes = None
 intents = None
 preprocessor = None
 
-# Load the model and metadata if they exist
+# Try loading model + metadata from disk
 def load_model_and_metadata():
     global model, words, classes, intents, preprocessor
-    
+
+    model_path = 'model/chatbot_model.keras'
+    metadata_path = 'model/metadata.pkl'
+    preproc_path = 'model/preprocessor.pkl'
+
     try:
-        # Try loading Keras v3 format first
-        keras_v3_path = os.path.join('model', 'chatbot_model.keras')
-        if os.path.exists(keras_v3_path):
-            model = tf.keras.models.load_model(keras_v3_path)
-        else:
-            # Fallback to SavedModel format
-            model = tf.keras.models.load_model(os.path.join('model', 'chatbot_model'))
-        
-        # Load metadata
-        metadata_path = os.path.join('model', 'metadata.pkl')
+        print(f"[startup] Loading Keras model from {model_path}...")
+        model = tf.keras.models.load_model(model_path)
+        print("[startup] Model loaded.")
+
+        print(f"[startup] Loading metadata from {metadata_path}...")
         with open(metadata_path, 'rb') as f:
             metadata = pickle.load(f)
-        
-        words = metadata['words']
-        classes = metadata['classes']
-        intents = metadata['intents']
-        
-        # Load preprocessor
-        preprocessor_path = os.path.join('model', 'preprocessor.pkl')
-        with open(preprocessor_path, 'rb') as f:
+        words = metadata.get('words', [])
+        classes = metadata.get('classes', [])
+        intents = metadata.get('intents', [])
+        print(f"[startup] Loaded metadata: {len(words)} words, {len(classes)} classes, {len(intents)} intents.")
+
+        print(f"[startup] Loading preprocessor from {preproc_path}...")
+        with open(preproc_path, 'rb') as f:
             preprocessor = pickle.load(f)
-            
+        print("[startup] Preprocessor loaded.")
+
         return True
+
     except Exception as e:
-        print(f"Error loading model: {str(e)}")
+        print(f"[startup][ERROR] Failed to load model/metadata: {e}")
+        model = None
         return False
 
-# User sessions to store context
+# Simple user sessions for context/preferences
 user_sessions = {}
 
-# Function to convert a sentence to a bag of words
 def sentence_to_bag_of_words(sentence, words, preprocessor):
-    # Tokenize and preprocess the sentence
     tokens = preprocessor.preprocess(sentence)
-    
-    # Initialize bag of words
-    bag = [0] * len(words)
-    
-    # Fill the bag of words array
-    for token in tokens:
-        for i, word in enumerate(words):
-            if word == token:
-                bag[i] = 1
-    
+    bag = [1 if w in tokens else 0 for w in words]
     return np.array([bag])
 
-# Function to predict the intent of a sentence
 def predict_intent(sentence, model, words, classes, preprocessor, threshold=0.25):
-    # Convert sentence to bag of words
     bow = sentence_to_bag_of_words(sentence, words, preprocessor)
-    
-    # Make prediction
-    results = model.predict(bow)[0]
-    
-    # Filter out predictions below threshold
-    results = [[i, r] for i, r in enumerate(results) if r > threshold]
-    
-    # Sort by probability
-    results.sort(key=lambda x: x[1], reverse=True)
-    
-    # Return list of intents and probabilities
-    return_list = []
-    for r in results:
-        return_list.append({'intent': classes[r[0]], 'probability': float(r[1])})
-    
-    return return_list
+    probs = model.predict(bow)[0]
+    filtered = [(i, p) for i, p in enumerate(probs) if p > threshold]
+    filtered.sort(key=lambda x: x[1], reverse=True)
+    return [{'intent': classes[i], 'probability': float(p)} for i, p in filtered]
 
-# Function to get a response based on the predicted intent
 def get_response(intents_list, intents_data, user_context=None, user_preferences=None):
     if not intents_list:
         return {
@@ -102,140 +73,105 @@ def get_response(intents_list, intents_data, user_context=None, user_preferences
             'new_context': user_context,
             'preferences': user_preferences or {}
         }
-    
-    tag = intents_list[0]['intent']
-    probability = intents_list[0]['probability']
-    
-    # Extract user preferences if applicable
-    preferences = extract_preferences(tag)
-    if user_preferences:
-        preferences.update(user_preferences)
-    
-    # Find the intent in intents_data
-    for intent in intents_data:
-        if intent['tag'] == tag:
-            # Get a random response
-            response = random.choice(intent['responses'])
-            
-            # Replace placeholders with user preferences
-            response = replace_placeholders(response, preferences)
-            
-            # Get the new context if available
-            new_context = None
-            if 'context' in intent and intent['context']:
-                new_context = intent['context'][0]
-            
+
+    top = intents_list[0]
+    tag = top['intent']
+    confidence = top['probability']
+
+    # merge preferences
+    prefs = user_preferences.copy() if user_preferences else {}
+    prefs.update(extract_preferences(tag))
+
+    for intent_def in intents_data:
+        if intent_def['tag'] == tag:
+            resp = random.choice(intent_def.get('responses', []))
+            resp = replace_placeholders(resp, prefs)
+            new_ctx = intent_def.get('context', [None])[0]
             return {
-                'text': response,
+                'text': resp,
                 'context': user_context,
-                'new_context': new_context,
-                'preferences': preferences,
-                'confidence': probability
+                'new_context': new_ctx,
+                'preferences': prefs,
+                'confidence': confidence
             }
-    
+
     return {
         'text': "I'm not sure I understand. Could you rephrase that?",
         'context': user_context,
         'new_context': user_context,
-        'preferences': user_preferences or {}
+        'preferences': prefs,
+        'confidence': confidence
     }
 
-# Helper function to extract preferences from intent tag and message
 def extract_preferences(tag):
-    # This is a simplified version - in a real app, you would extract
-    # actual preferences from the user's message based on the intent tag
-    preferences = {}
-    
-    # Example extraction based on tag
+    prefs = {}
     if 'property_type' in tag:
-        preferences['propertyType'] = 'property type'
-    elif 'location' in tag:
-        preferences['location'] = 'location'
-    elif 'price' in tag:
-        preferences['price'] = 'price range'
-    
-    return preferences
+        prefs['propertyType'] = None
+    if 'location' in tag:
+        prefs['location'] = None
+    if 'price' in tag:
+        prefs['price'] = None
+    return prefs
 
-# Helper function to replace placeholders in response
-def replace_placeholders(response, preferences):
-    if '%PROPERTY%' in response and 'propertyType' in preferences:
-        response = response.replace('%PROPERTY%', preferences['propertyType'])
-    if '%LOCATION%' in response and 'location' in preferences:
-        response = response.replace('%LOCATION%', preferences['location'])
-    if '%PRICE%' in response and 'price' in preferences:
-        response = response.replace('%PRICE%', preferences['price'])
-    
-    return response
+def replace_placeholders(text, prefs):
+    if '%PROPERTY%' in text and prefs.get('propertyType'):
+        text = text.replace('%PROPERTY%', prefs['propertyType'])
+    if '%LOCATION%' in text and prefs.get('location'):
+        text = text.replace('%LOCATION%', prefs['location'])
+    if '%PRICE%' in text and prefs.get('price'):
+        text = text.replace('%PRICE%', prefs['price'])
+    return text
 
 @app.route('/api/message', methods=['POST'])
 def process_message():
-    # Check if model is loaded
+    global model, words, classes, intents, preprocessor
+
     if model is None:
         if not load_model_and_metadata():
             return jsonify({
                 'error': 'Model not loaded',
-                'message': 'The chatbot model is not available. Please train the model first.'
+                'message': 'Chatbot model or metadata missing. Please train first.'
             }), 500
-    
-    data = request.json
-    user_id = data.get('user_id', 'default_user')
-    message = data.get('message', '')
-    
-    # Get or create user session
-    if user_id not in user_sessions:
-        user_sessions[user_id] = {
-            'context': None,
-            'preferences': {}
-        }
-    
-    # Get user context and preferences
-    user_context = user_sessions[user_id]['context']
-    user_preferences = user_sessions[user_id]['preferences']
-    
-    # Predict intent
-    intents_list = predict_intent(message, model, words, classes, preprocessor)
-    
-    # Get response
-    response_data = get_response(intents_list, intents, user_context, user_preferences)
-    
-    # Update user session
-    if response_data['new_context']:
-        user_sessions[user_id]['context'] = response_data['new_context']
-    
-    if response_data['preferences']:
-        user_sessions[user_id]['preferences'].update(response_data['preferences'])
-    
+
+    data = request.get_json() or {}
+    user_id = data.get('user_id', 'default')
+    msg = data.get('message', '')
+
+    # init session
+    session = user_sessions.setdefault(user_id, {'context': None, 'preferences': {}})
+    user_context = session['context']
+    user_prefs   = session['preferences']
+
+    # run through pipeline
+    intents_list = predict_intent(msg, model, words, classes, preprocessor)
+    resp_data    = get_response(intents_list, intents, user_context, user_prefs)
+
+    # update session
+    if resp_data.get('new_context') is not None:
+        session['context'] = resp_data['new_context']
+    if resp_data.get('preferences'):
+        session['preferences'].update(resp_data['preferences'])
+
     return jsonify({
-        'response': response_data['text'],
-        'context': response_data['new_context'],
-        'preferences': user_sessions[user_id]['preferences'],
-        'confidence': response_data.get('confidence', 0)
+        'response': resp_data['text'],
+        'context':  resp_data['new_context'],
+        'preferences': session['preferences'],
+        'confidence': resp_data.get('confidence', 0)
     })
 
 @app.route('/api/reset', methods=['POST'])
 def reset_conversation():
-    data = request.json
-    user_id = data.get('user_id', 'default_user')
-    
-    # Reset user session
-    user_sessions[user_id] = {
-        'context': None,
-        'preferences': {}
-    }
-    
-    return jsonify({
-        'status': 'success',
-        'message': 'Conversation reset successfully'
-    })
+    data = request.get_json() or {}
+    user_id = data.get('user_id', 'default')
+    user_sessions[user_id] = {'context': None, 'preferences': {}}
+    return jsonify({'status': 'reset'})
 
 @app.route('/', methods=['GET'])
 def index():
-    return "Algerian Real Estate Chatbot API is running!"
+    return "🕌 Algerian Real Estate Chatbot API is up!"
 
 if __name__ == '__main__':
-    # Try to load model and metadata
+    # pre-load at startup if possible
     load_model_and_metadata()
-    
-    # Get port from environment variable for Heroku
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
